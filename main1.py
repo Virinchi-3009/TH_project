@@ -59,13 +59,40 @@ def th_to_lat_lon(th_code):
         print(f"Error decoding TH code '{th_code}': {e}")
         return None, None
 
-def process_excel(file_path):
-    data = pd.read_excel(file_path)
+def shorten_url_with_tinyurl(long_url, custom_alias):
+    try:
+        tinyurl_url = f"https://tinyurl.com/api-create.php?url={long_url}&alias={custom_alias}"
+        response = requests.get(tinyurl_url)
+        if response.status_code == 200:
+            shortened_url = response.text
+            return shortened_url.replace('http://', '').replace('https://', '')
+        else:
+            return "Error generating short URL"
+    except Exception as e:
+        return f"Error: {e}"
 
-    # Clean column names by stripping whitespaces
-    data.columns = data.columns.str.strip()
+def generate_random_string(length=1):
+    return ''.join(random.choices(string.ascii_lowercase, k=length))
+
+@app.route('/shorten', methods=['POST'])
+def shorten_url():
+    try:
+        data = request.get_json()
+        long_url = data['url']
+        custom_alias = data['alias'].replace("'", "")
+        short_url = shorten_url_with_tinyurl(long_url, custom_alias)
+        return jsonify({'shortened_url': short_url}), 200
+    except Exception as e:
+        return jsonify({'error': str(e)}), 400
+
+def process_excel(file_path):
+    try:
+        data = pd.read_excel(file_path, engine='openpyxl')
+    except Exception as e:
+        raise Exception(f"Error reading the file: {e}")
 
     if 'Home Street' in data.columns:
+        # Generate latitude and longitude
         lat_long_list = []
         for th_code in data['Home Street']:
             lat, lon = th_to_lat_lon(str(th_code))
@@ -73,12 +100,29 @@ def process_excel(file_path):
                 lat_long_list.append(f"{lat}, {lon}")
             else:
                 lat_long_list.append("Invalid TH Code")
-        
-        data['Lat-Long'] = lat_long_list
-        data['Web Page'] = data['Lat-Long'].apply(lambda x: f"https://www.google.com/maps/dir/?api=1&origin=My+Location&destination={x}")
 
-        # Save the updated DataFrame back to the same file (overwrite the input file)
+        data['Lat-Long'] = lat_long_list
+
+        # Generate Web Page URLs
+        data['Web Page'] = data['Lat-Long'].apply(
+            lambda x: f"https://www.google.com/maps/dir/?api=1&origin=My+Location&destination={x}" if "Invalid" not in x else "Invalid URL"
+        )
+
+        # Generate Short URLs
+        def generate_shortened_url(row):
+            if "Invalid" in row['Lat-Long']:
+                return "Invalid Short URL"
+            long_url = row['Web Page']
+            custom_alias = row['Home Street'].replace("'", "")  # Remove apostrophes for custom alias
+            return shorten_url_with_tinyurl(long_url, custom_alias)
+
+        data['Short URL'] = data.apply(generate_shortened_url, axis=1)
+
+        # Save updated Excel file
         data.to_excel(file_path, index=False)
+        print(f"File processed successfully: {file_path}")
+    else:
+        raise ValueError("'Home Street' column not found in the uploaded Excel file.")
 
 def save_uploaded_file(file):
     file_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
@@ -102,5 +146,6 @@ def upload():
     process_excel(file_path)
     return jsonify({'message': 'File processed successfully', 'file': file_path}), 200
 
+# Run the Flask app
 if __name__ == "__main__":
-    app.run(debug=True)
+    threading.Thread(target=lambda: app.run(debug=True, use_reloader=False)).start()
